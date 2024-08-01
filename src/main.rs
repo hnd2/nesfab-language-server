@@ -1,8 +1,9 @@
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
-        CompletionItem, CompletionParams, CompletionResponse, Hover, HoverContents, HoverParams,
-        InitializeParams, InitializeResult, InitializedParams, MarkedString, MessageType,
+        CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, Hover,
+        HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+        InitializedParams, MarkedString, MessageType, ServerCapabilities,
     },
     Client, LanguageServer, LspService, Server,
 };
@@ -15,13 +16,24 @@ struct Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
-        Ok(InitializeResult::default())
+        Ok(InitializeResult {
+            server_info: None,
+            capabilities: ServerCapabilities {
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                completion_provider: Some(CompletionOptions::default()),
+                ..Default::default()
+            },
+        })
     }
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "server initialized.")
             .await;
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
     }
 
     async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -35,10 +47,6 @@ impl LanguageServer for Backend {
             contents: HoverContents::Scalar(MarkedString::String("You're hovering".to_string())),
             range: None,
         }))
-    }
-
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
     }
 }
 

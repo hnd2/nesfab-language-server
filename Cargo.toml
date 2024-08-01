@@ -2,7 +2,17 @@
 name = "nesfab-language-server"
 version = "0.1.0"
 edition = "2021"
+default-run = "nesfab-language-server"
+
+[build-dependencies]
+cc = "*"
 
 [dependencies]
+anyhow = "1.0.86"
 tokio = { version = "1.39.2", features = ["full"] }
 tower-lsp = "0.20.0"
+tree-sitter = "0.22.6"
+tree-sitter-nesfab = { git = "https://github.com/hnd2/tree-sitter-nesfab.git" }
+
+[[bin]]
+name = "collect_symbols"
