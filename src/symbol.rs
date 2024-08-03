@@ -26,7 +26,9 @@ impl SymbolTable {
         let symbol = match parent.kind() {
             "call" => self.functions.get(name).map(|s| s.to_owned()),
             _ => match parent.parent().context("failed to get parent")?.kind() {
-                "function_definition" => self.functions.get(name).map(|s| s.to_owned()),
+                "function_definition" | "asm_function_definition" => {
+                    self.functions.get(name).map(|s| s.to_owned())
+                }
                 _ => None,
             },
         };
@@ -122,9 +124,12 @@ pub fn traverse_tree(
     loop {
         let node = cursor.node();
         if node.is_named() {
-            if node.kind() == "function_definition" {
-                let symbol = FunctionSymbol::from_node(source, &node)?;
-                symbol_table.functions.insert(symbol.name.clone(), symbol);
+            match node.kind() {
+                "function_definition" | "asm_function_definition" => {
+                    let symbol = FunctionSymbol::from_node(source, &node)?;
+                    symbol_table.functions.insert(symbol.name.clone(), symbol);
+                }
+                _ => {}
             }
         }
         if cursor.goto_first_child() {
