@@ -34,7 +34,7 @@ impl Backend {
         }
     }
 
-    pub async fn on_change(&self, params: TextDocumentItem) -> anyhow::Result<()> {
+    async fn on_change(&self, params: TextDocumentItem) -> anyhow::Result<()> {
         let file_path = params.uri.to_file_path().unwrap();
         let source = &params.text;
         self.source_map.insert(file_path.clone(), source.clone());
@@ -56,7 +56,7 @@ impl Backend {
         Ok(())
     }
 
-    pub async fn on_change_workspace_folders(
+    async fn on_change_workspace_folders(
         &self,
         event: WorkspaceFoldersChangeEvent,
     ) -> anyhow::Result<()> {
@@ -114,7 +114,56 @@ impl Backend {
 
         Ok(())
     }
-    pub fn hover(&self, file_path: &Path, point: &Point) -> anyhow::Result<Option<HoverContents>> {
+
+    fn hover(&self, file_path: &Path, point: &Point) -> anyhow::Result<Option<HoverContents>> {
+        match self.find_symbol(file_path, point) {
+            Ok(Some((file_path, symbol))) => {
+                let marked_string = MarkedString::LanguageString(LanguageString {
+                    language: "nesfab".to_string(),
+                    value: symbol.description().to_string(),
+                });
+                let file_path = self.get_relative_path(&file_path).unwrap_or(file_path);
+                let path_marked_string =
+                    MarkedString::from_markdown(file_path.to_string_lossy().into());
+
+                Ok(Some(HoverContents::Array(vec![
+                    path_marked_string,
+                    marked_string,
+                ])))
+            }
+            Err(e) => Err(e),
+            _ => Ok(None),
+        }
+    }
+
+    fn goto_definition(
+        &self,
+        file_path: &Path,
+        point: &Point,
+    ) -> anyhow::Result<Option<(Url, Range)>> {
+        match self.find_symbol(file_path, point) {
+            Ok(Some((file_path, symbol))) => {
+                let url = Url::from_file_path(file_path).unwrap();
+                let range = symbol.range();
+                Ok(Some((url, range.into())))
+            }
+            Err(e) => Err(e),
+            _ => Ok(None),
+        }
+    }
+
+    fn get_relative_path(&self, path: &Path) -> Option<PathBuf> {
+        self.workspace_dirs
+            .iter()
+            .find_map(|file_path| path.strip_prefix(file_path.to_owned()).ok())
+            .map(|path| path.to_path_buf())
+    }
+
+    fn find_symbol(
+        &self,
+        file_path: &Path,
+        point: &Point,
+    ) -> anyhow::Result<Option<(PathBuf, impl Symbol)>> {
         let source = self
             .source_map
             .get(file_path)
@@ -130,7 +179,7 @@ impl Backend {
 
         if node.kind() == "identifier" {
             let name = node.utf8_text(source.as_bytes())?;
-            let symbol = self
+            let pair = self
                 .symbol_map
                 .get(file_path)
                 .and_then(|symbols| {
@@ -150,29 +199,10 @@ impl Backend {
                             .map(|symbol| (path.to_owned(), symbol))
                             .ok()
                     }));
-            if let Some((file_path, symbol)) = symbol {
-                let marked_string = MarkedString::LanguageString(LanguageString {
-                    language: "nesfab".to_string(),
-                    value: symbol.description().to_string(),
-                });
-                let file_path = self.get_relative_path(&file_path).unwrap_or(file_path);
-                let path_marked_string =
-                    MarkedString::from_markdown(file_path.to_string_lossy().into());
-
-                return Ok(Some(HoverContents::Array(vec![
-                    path_marked_string,
-                    marked_string,
-                ])));
-            }
+            return Ok(pair);
+        } else {
+            return Ok(None);
         }
-        Ok(None)
-    }
-
-    pub fn get_relative_path(&self, path: &Path) -> Option<PathBuf> {
-        self.workspace_dirs
-            .iter()
-            .find_map(|file_path| path.strip_prefix(file_path.to_owned()).ok())
-            .map(|path| path.to_path_buf())
     }
 }
 
@@ -202,6 +232,7 @@ impl LanguageServer for Backend {
                     }),
                     file_operations: None,
                 }),
+                definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 completion_provider: Some(CompletionOptions::default()),
                 ..Default::default()
@@ -343,6 +374,37 @@ impl LanguageServer for Backend {
                     .await;
                 Err(jsonrpc::Error::internal_error())
             }
+            _ => Ok(None),
+        }
+    }
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        self.client
+            .log_message(MessageType::INFO, format!("goto definition"))
+            .await;
+
+        let file_path = match params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_file_path()
+        {
+            Ok(ok) => ok,
+            Err(e) => {
+                self.client
+                    .log_message(MessageType::ERROR, format!("error: {e:?}"))
+                    .await;
+                return Err(jsonrpc::Error::internal_error());
+            }
+        };
+        let position = params.text_document_position_params.position;
+        let point = Point::new(position.line as usize, position.character as usize);
+        match self.goto_definition(&file_path, &point) {
+            Ok(Some((url, range))) => Ok(Some(GotoDefinitionResponse::Scalar(Location::new(
+                url, range,
+            )))),
             _ => Ok(None),
         }
     }

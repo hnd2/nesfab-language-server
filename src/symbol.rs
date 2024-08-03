@@ -1,5 +1,6 @@
 use anyhow::Context;
-use std::{collections::HashMap, ops::Range};
+use std::collections::HashMap;
+use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Node, Parser, TreeCursor};
 
 #[derive(Debug, Default)]
@@ -40,13 +41,13 @@ pub trait Symbol {
     fn from_node(source: &str, node: &Node) -> anyhow::Result<Self>
     where
         Self: Sized;
-    fn range(&self) -> Range<usize>;
+    fn range(&self) -> Range;
     fn description(&self) -> &str;
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct FunctionSymbol {
-    pub range: Range<usize>,
+    pub range: Range,
 
     pub name: String,
     // arguments: Vec<VariableSymbol>,
@@ -101,14 +102,25 @@ impl Symbol for FunctionSymbol {
                 })
             });
         let description = comments.unwrap_or("".to_string()) + signature.utf8_text(bytes)?;
+        let node_range = node.range();
+        let range = Range {
+            start: Position::new(
+                node_range.start_point.row as u32,
+                node_range.start_point.column as u32,
+            ),
+            end: Position::new(
+                node_range.end_point.row as u32,
+                node_range.end_point.column as u32,
+            ),
+        };
 
         Ok(FunctionSymbol {
             name: name.to_string(),
-            range: node.byte_range(),
+            range,
             description,
         })
     }
-    fn range(&self) -> Range<usize> {
+    fn range(&self) -> Range {
         self.range.to_owned()
     }
     fn description(&self) -> &str {
