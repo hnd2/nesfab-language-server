@@ -6,7 +6,7 @@ use tree_sitter::{Node, Parser, TreeCursor};
 #[derive(Debug, Default, Clone)]
 pub struct SymbolTable {
     pub functions: HashMap<String, FunctionSymbol>,
-    // global_variables: HashMap<String, VariableSymbol>,
+    pub global_variables: HashMap<String, VariableSymbol>,
 }
 impl SymbolTable {
     pub fn from_source(source: &str) -> anyhow::Result<Self> {
@@ -59,35 +59,13 @@ pub struct FunctionSymbol {
     pub comments: Option<String>,
 }
 
-fn collect_sibling_comment_nodes(node: Node) -> Vec<Node> {
-    let mut comments = Vec::new();
-    let mut pivot_line_number = node.start_position().row as isize;
-    let mut pivot = Some(node);
-    loop {
-        if let Some(node) = pivot {
-            if node.kind() == "comment"
-                && (pivot_line_number - (node.end_position().row as isize) <= 1)
-            {
-                comments.push(node);
-                pivot_line_number = node.start_position().row as isize;
-            } else {
-                break;
-            }
-            pivot = node.prev_sibling();
-        } else {
-            break;
-        }
-    }
-    comments
-}
-
 impl Symbol for FunctionSymbol {
     fn from_node(source: &str, node: &Node) -> anyhow::Result<Self> {
+        let bytes = source.as_bytes();
         let signature = node.child_by_field_name("signature").context(format!(
             "failed to get signature node: {:?}",
             node.byte_range()
         ))?;
-        let bytes = source.as_bytes();
         let name = signature
             .child_by_field_name("name")
             .context(format!("failed to get node: {:?}", node.byte_range()))
@@ -135,6 +113,89 @@ impl Symbol for FunctionSymbol {
     fn description(&self) -> &str {
         self.description.as_str()
     }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct VariableSymbol {
+    pub range: Range,
+    pub description: String,
+
+    pub name: String,
+    // pub value_type: TypeSymbol,
+    pub comments: Option<String>,
+}
+
+impl Symbol for VariableSymbol {
+    fn from_node(source: &str, node: &Node) -> anyhow::Result<Self> {
+        let bytes = source.as_bytes();
+        let name = node
+            .child_by_field_name("name")
+            .context(format!("failed to get node: {:?}", node.byte_range()))
+            .and_then(|node| {
+                node.utf8_text(source.as_bytes())
+                    .map_err(anyhow::Error::from)
+            })?;
+        let comments = node
+            .prev_sibling()
+            .map(|node| collect_sibling_comment_nodes(node))
+            .map(|comments| {
+                comments.iter().rfold(String::new(), |acc, x| {
+                    acc + x.utf8_text(bytes).unwrap_or("") + "\n"
+                })
+            });
+        let description = format!(
+            "{}{}",
+            comments.clone().unwrap_or("".to_string()),
+            node.utf8_text(source.as_bytes())
+                .map_err(anyhow::Error::from)?
+        );
+        let node_range = node.range();
+        let range = Range {
+            start: Position::new(
+                node_range.start_point.row as u32,
+                node_range.start_point.column as u32,
+            ),
+            end: Position::new(
+                node_range.end_point.row as u32,
+                node_range.end_point.column as u32,
+            ),
+        };
+
+        Ok(VariableSymbol {
+            name: name.to_string(),
+            range,
+            description,
+            comments,
+        })
+    }
+    fn range(&self) -> Range {
+        self.range.to_owned()
+    }
+    fn description(&self) -> &str {
+        self.description.as_str()
+    }
+}
+
+fn collect_sibling_comment_nodes(node: Node) -> Vec<Node> {
+    let mut comments = Vec::new();
+    let mut pivot_line_number = node.start_position().row as isize;
+    let mut pivot = Some(node);
+    loop {
+        if let Some(node) = pivot {
+            if node.kind() == "comment"
+                && (pivot_line_number - (node.end_position().row as isize) <= 1)
+            {
+                comments.push(node);
+                pivot_line_number = node.start_position().row as isize;
+            } else {
+                break;
+            }
+            pivot = node.prev_sibling();
+        } else {
+            break;
+        }
+    }
+    comments
 }
 
 pub fn traverse_tree(

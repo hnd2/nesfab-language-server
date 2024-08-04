@@ -466,7 +466,7 @@ fn file_path_and_point_from_params(
     text_document
         .uri
         .to_file_path()
-        .map_err(|e| jsonrpc::Error::invalid_request())
+        .map_err(|_e| jsonrpc::Error::invalid_request())
         .map(|file_path| {
             let point = Point::new(position.line as usize, position.character as usize);
             (file_path, point)
