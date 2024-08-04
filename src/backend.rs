@@ -1,5 +1,5 @@
 use crate::{cfg::collect_cfg_map, symbol::*};
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
 use std::{
@@ -44,7 +44,10 @@ impl Backend {
     }
 
     async fn on_change(&self, params: TextDocumentItem) -> anyhow::Result<()> {
-        let file_path = params.uri.to_file_path().unwrap();
+        let file_path = params
+            .uri
+            .to_file_path()
+            .map_err(|_| anyhow!("failed to convert url to file path"))?;
         let source = &params.text;
         self.source_map.insert(file_path.clone(), source.clone());
 
@@ -129,21 +132,6 @@ impl Backend {
         file_path: &Path,
         _point: &Point,
     ) -> anyhow::Result<Option<CompletionResponse>> {
-        // let source = self
-        //     .source_map
-        //     .get(file_path)
-        //     .context(format!("failed to get source file: {file_path:?}"))?;
-        // let tree = self
-        //     .tree_map
-        //     .get(file_path)
-        //     .context(format!("failed to get tree file: {file_path:?}"))?;
-        // let node = tree
-        //     .root_node()
-        //     .descendant_for_point_range(*point, *point)
-        //     .context(format!("failed to get node file: {file_path:?}"))?;
-        // self.client
-        //     .log_message(MessageType::INFO, format!("{:?}", node))
-        //     .await;
         let dependency_symbols = self
             .get_dependencies(file_path)
             .into_iter()
@@ -156,24 +144,38 @@ impl Backend {
         let items = dependency_symbols
             .values()
             .flat_map(|symbol_table| {
-                symbol_table
-                    .functions
-                    .iter()
-                    .map(|(name, symbol)| CompletionItem {
-                        label: name.to_owned(),
-                        kind: Some(CompletionItemKind::FUNCTION),
-                        documentation: symbol.comments.as_ref().map(|comments| {
-                            Documentation::MarkupContent(MarkupContent {
+                let global_variables =
+                    symbol_table
+                        .global_variables
+                        .iter()
+                        .map(|(name, symbol)| CompletionItem {
+                            label: name.to_owned(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            documentation: Some(Documentation::MarkupContent(MarkupContent {
                                 kind: MarkupKind::Markdown,
-                                value: format!("{}\n  -------\n  {}", symbol.signature, comments),
-                            })
-                        }),
-                        // documentation: symbol
-                        //     .comments
-                        //     .as_ref()
-                        //     .map(|comments| Documentation::String(comments.to_owned())),
-                        ..Default::default()
-                    })
+                                value: format!("{}", symbol.description),
+                            })),
+                            ..Default::default()
+                        });
+                let functions =
+                    symbol_table
+                        .functions
+                        .iter()
+                        .map(|(name, symbol)| CompletionItem {
+                            label: name.to_owned(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            documentation: symbol.comments.as_ref().map(|comments| {
+                                Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!(
+                                        "{}\n  -------\n  {}",
+                                        symbol.signature, comments
+                                    ),
+                                })
+                            }),
+                            ..Default::default()
+                        });
+                global_variables.chain(functions)
             })
             .collect::<Vec<_>>();
         Ok(Some(CompletionResponse::Array(items)))
@@ -207,7 +209,8 @@ impl Backend {
     ) -> anyhow::Result<Option<GotoDefinitionResponse>> {
         match self.find_symbol(file_path, point) {
             Ok(Some((file_path, symbol))) => {
-                let url = Url::from_file_path(file_path).unwrap();
+                let url = Url::from_file_path(file_path)
+                    .map_err(|_| anyhow!("failed to convert file path to url"))?;
                 let range = symbol.range();
                 Ok(Some(GotoDefinitionResponse::Scalar(Location::new(
                     url, range,
@@ -229,7 +232,7 @@ impl Backend {
         &self,
         file_path: &Path,
         point: &Point,
-    ) -> anyhow::Result<Option<(PathBuf, impl Symbol)>> {
+    ) -> anyhow::Result<Option<(PathBuf, Box<dyn Symbol>)>> {
         let source = self
             .source_map
             .get(file_path)

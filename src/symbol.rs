@@ -22,15 +22,22 @@ impl SymbolTable {
         traverse_tree(source, &mut cursor, &mut symbol_table)?;
         Ok(symbol_table)
     }
-    pub fn find_symbol(&self, node: &Node, name: &str) -> anyhow::Result<impl Symbol> {
+    pub fn find_symbol(&self, node: &Node, name: &str) -> anyhow::Result<Box<dyn Symbol>> {
         let parent = node.parent().context("faield to get parent")?;
         let symbol = match parent.kind() {
-            "call" => self.functions.get(name).map(|s| s.to_owned()),
+            "call" => self
+                .functions
+                .get(name)
+                .map(|s| Box::new(s.to_owned()) as Box<dyn Symbol>),
             _ => match parent.parent().context("failed to get parent")?.kind() {
-                "function_definition" | "asm_function_definition" => {
-                    self.functions.get(name).map(|s| s.to_owned())
-                }
-                _ => None,
+                "function_definition" | "asm_function_definition" => self
+                    .functions
+                    .get(name)
+                    .map(|s| Box::new(s.to_owned()) as Box<dyn Symbol>),
+                _ => self
+                    .global_variables
+                    .get(name)
+                    .map(|s| Box::new(s.to_owned()) as Box<dyn Symbol>),
             },
         };
         symbol.context("failed to find symbol: {name}")
@@ -210,6 +217,17 @@ pub fn traverse_tree(
                 "function_definition" | "asm_function_definition" => {
                     let symbol = FunctionSymbol::from_node(source, &node)?;
                     symbol_table.functions.insert(symbol.name.clone(), symbol);
+                }
+                "variable_definition" => {
+                    // check global variable only
+                    if let Some(parent) = node.parent() {
+                        if parent.kind() == "module" || parent.kind() == "vars_definition" {
+                            let symbol = VariableSymbol::from_node(source, &node)?;
+                            symbol_table
+                                .global_variables
+                                .insert(symbol.name.clone(), symbol);
+                        }
+                    }
                 }
                 _ => {}
             }
