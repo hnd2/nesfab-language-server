@@ -34,6 +34,15 @@ impl Backend {
         }
     }
 
+    fn get_dependencies(&self, file_path: &Path) -> HashSet<PathBuf> {
+        let file_path = file_path.to_owned();
+        self.cfg_map
+            .iter()
+            .filter(|entry| entry.pair().1.contains(&file_path))
+            .flat_map(|entry| entry.pair().1.to_owned())
+            .collect()
+    }
+
     async fn on_change(&self, params: TextDocumentItem) -> anyhow::Result<()> {
         let file_path = params.uri.to_file_path().unwrap();
         let source = &params.text;
@@ -115,7 +124,62 @@ impl Backend {
         Ok(())
     }
 
-    fn hover(&self, file_path: &Path, point: &Point) -> anyhow::Result<Option<HoverContents>> {
+    async fn completion(
+        &self,
+        file_path: &Path,
+        _point: &Point,
+    ) -> anyhow::Result<Option<CompletionResponse>> {
+        // let source = self
+        //     .source_map
+        //     .get(file_path)
+        //     .context(format!("failed to get source file: {file_path:?}"))?;
+        // let tree = self
+        //     .tree_map
+        //     .get(file_path)
+        //     .context(format!("failed to get tree file: {file_path:?}"))?;
+        // let node = tree
+        //     .root_node()
+        //     .descendant_for_point_range(*point, *point)
+        //     .context(format!("failed to get node file: {file_path:?}"))?;
+        // self.client
+        //     .log_message(MessageType::INFO, format!("{:?}", node))
+        //     .await;
+        let dependency_symbols = self
+            .get_dependencies(file_path)
+            .into_iter()
+            .filter_map(|file_path| self.symbol_map.get(&file_path))
+            .map(|symbol_map| {
+                let pair = symbol_map.pair();
+                (pair.0.to_owned(), pair.1.clone())
+            })
+            .collect::<HashMap<_, _>>();
+        let items = dependency_symbols
+            .values()
+            .flat_map(|symbol_table| {
+                symbol_table
+                    .functions
+                    .iter()
+                    .map(|(name, symbol)| CompletionItem {
+                        label: name.to_owned(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        documentation: symbol.comments.as_ref().map(|comments| {
+                            Documentation::MarkupContent(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: format!("{}\n  -------\n  {}", symbol.signature, comments),
+                            })
+                        }),
+                        // documentation: symbol
+                        //     .comments
+                        //     .as_ref()
+                        //     .map(|comments| Documentation::String(comments.to_owned())),
+                        ..Default::default()
+                    })
+            })
+            .collect::<Vec<_>>();
+        Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    fn hover(&self, file_path: &Path, point: &Point) -> anyhow::Result<Option<Hover>> {
         match self.find_symbol(file_path, point) {
             Ok(Some((file_path, symbol))) => {
                 let marked_string = MarkedString::LanguageString(LanguageString {
@@ -126,10 +190,10 @@ impl Backend {
                 let path_marked_string =
                     MarkedString::from_markdown(file_path.to_string_lossy().into());
 
-                Ok(Some(HoverContents::Array(vec![
-                    path_marked_string,
-                    marked_string,
-                ])))
+                Ok(Some(Hover {
+                    contents: HoverContents::Array(vec![path_marked_string, marked_string]),
+                    range: None,
+                }))
             }
             Err(e) => Err(e),
             _ => Ok(None),
@@ -140,12 +204,14 @@ impl Backend {
         &self,
         file_path: &Path,
         point: &Point,
-    ) -> anyhow::Result<Option<(Url, Range)>> {
+    ) -> anyhow::Result<Option<GotoDefinitionResponse>> {
         match self.find_symbol(file_path, point) {
             Ok(Some((file_path, symbol))) => {
                 let url = Url::from_file_path(file_path).unwrap();
                 let range = symbol.range();
-                Ok(Some((url, range.into())))
+                Ok(Some(GotoDefinitionResponse::Scalar(Location::new(
+                    url, range,
+                ))))
             }
             Err(e) => Err(e),
             _ => Ok(None),
@@ -340,72 +406,69 @@ impl LanguageServer for Backend {
             .await;
     }
 
-    async fn completion(&self, _: CompletionParams) -> jsonrpc::Result<Option<CompletionResponse>> {
-        Ok(Some(CompletionResponse::Array(vec![
-            CompletionItem::new_simple("Hello".to_string(), "Some detail".to_string()),
-            CompletionItem::new_simple("Bye".to_string(), "More detail".to_string()),
-        ])))
-    }
-    async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
-        let file_path = match params
-            .text_document_position_params
-            .text_document
-            .uri
-            .to_file_path()
-        {
-            Ok(ok) => ok,
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> jsonrpc::Result<Option<CompletionResponse>> {
+        let (file_path, point) = file_path_and_point_from_params(
+            &params.text_document_position.text_document,
+            &params.text_document_position.position,
+        )?;
+        match self.completion(&file_path, &point).await {
+            Ok(ok) => Ok(ok),
             Err(e) => {
                 self.client
-                    .log_message(MessageType::ERROR, format!("error: {e:?}"))
-                    .await;
-                return Err(jsonrpc::Error::internal_error());
-            }
-        };
-        let position = params.text_document_position_params.position;
-        let point = Point::new(position.line as usize, position.character as usize);
-        match self.hover(&file_path, &point) {
-            Ok(Some(contents)) => Ok(Some(Hover {
-                contents,
-                range: None,
-            })),
-            Err(e) => {
-                self.client
-                    .log_message(MessageType::ERROR, format!("error: {e:?}"))
+                    .log_message(MessageType::ERROR, format!("completion error: {e:?}"))
                     .await;
                 Err(jsonrpc::Error::internal_error())
             }
-            _ => Ok(None),
+        }
+    }
+    async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
+        let (file_path, point) = file_path_and_point_from_params(
+            &params.text_document_position_params.text_document,
+            &params.text_document_position_params.position,
+        )?;
+        match self.hover(&file_path, &point) {
+            Ok(ok) => Ok(ok),
+            Err(e) => {
+                self.client
+                    .log_message(MessageType::ERROR, format!("hover error: {e:?}"))
+                    .await;
+                Err(jsonrpc::Error::internal_error())
+            }
         }
     }
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
-        self.client
-            .log_message(MessageType::INFO, format!("goto definition"))
-            .await;
-
-        let file_path = match params
-            .text_document_position_params
-            .text_document
-            .uri
-            .to_file_path()
-        {
-            Ok(ok) => ok,
+        let (file_path, point) = file_path_and_point_from_params(
+            &params.text_document_position_params.text_document,
+            &params.text_document_position_params.position,
+        )?;
+        match self.goto_definition(&file_path, &point) {
+            Ok(ok) => Ok(ok),
             Err(e) => {
                 self.client
-                    .log_message(MessageType::ERROR, format!("error: {e:?}"))
+                    .log_message(MessageType::ERROR, format!("goto definition error: {e:?}"))
                     .await;
-                return Err(jsonrpc::Error::internal_error());
+                Err(jsonrpc::Error::internal_error())
             }
-        };
-        let position = params.text_document_position_params.position;
-        let point = Point::new(position.line as usize, position.character as usize);
-        match self.goto_definition(&file_path, &point) {
-            Ok(Some((url, range))) => Ok(Some(GotoDefinitionResponse::Scalar(Location::new(
-                url, range,
-            )))),
-            _ => Ok(None),
         }
     }
+}
+
+fn file_path_and_point_from_params(
+    text_document: &TextDocumentIdentifier,
+    position: &Position,
+) -> jsonrpc::Result<(PathBuf, Point)> {
+    text_document
+        .uri
+        .to_file_path()
+        .map_err(|e| jsonrpc::Error::invalid_request())
+        .map(|file_path| {
+            let point = Point::new(position.line as usize, position.character as usize);
+            (file_path, point)
+        })
 }

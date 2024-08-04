@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Node, Parser, TreeCursor};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SymbolTable {
     pub functions: HashMap<String, FunctionSymbol>,
     // global_variables: HashMap<String, VariableSymbol>,
@@ -37,7 +37,7 @@ impl SymbolTable {
     }
 }
 
-pub trait Symbol {
+pub trait Symbol: std::fmt::Debug {
     fn from_node(source: &str, node: &Node) -> anyhow::Result<Self>
     where
         Self: Sized;
@@ -48,13 +48,15 @@ pub trait Symbol {
 #[derive(Debug, Default, Clone)]
 pub struct FunctionSymbol {
     pub range: Range,
+    pub description: String,
 
     pub name: String,
+    pub signature: String,
     // arguments: Vec<VariableSymbol>,
     // return_type: TypeSymbol,
     // modifiers: Vec<ModifierSymbol>,
     // local_variables: Vec<VariableSymbol>,
-    pub description: String,
+    pub comments: Option<String>,
 }
 
 fn collect_sibling_comment_nodes(node: Node) -> Vec<Node> {
@@ -101,7 +103,12 @@ impl Symbol for FunctionSymbol {
                     acc + x.utf8_text(bytes).unwrap_or("") + "\n"
                 })
             });
-        let description = comments.unwrap_or("".to_string()) + signature.utf8_text(bytes)?;
+        let signature = signature.utf8_text(bytes)?.to_string();
+        let description = format!(
+            "{}{}",
+            comments.clone().unwrap_or("".to_string()),
+            signature
+        );
         let node_range = node.range();
         let range = Range {
             start: Position::new(
@@ -118,6 +125,8 @@ impl Symbol for FunctionSymbol {
             name: name.to_string(),
             range,
             description,
+            signature,
+            comments,
         })
     }
     fn range(&self) -> Range {
